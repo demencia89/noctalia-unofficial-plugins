@@ -135,6 +135,7 @@ Item {
       "id": Date.now().toString(),
       "role": role,
       "content": content,
+      "read": role === "assistant" ? false : true,
       "timestamp": Math.floor(Date.now() / 1000)
     };
     root.messages = [...root.messages, newMessage];

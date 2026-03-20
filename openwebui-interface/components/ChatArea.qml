@@ -170,6 +170,14 @@ Item {
                        Quickshell.clipboardText = text;
                        ToastService.showNotice("Copied to clipboard");
                     }
+                    onCompleted: {
+                        if (!message.read) {
+                            // If near bottom (user is viewing latest messages)
+                            if (chatFlickable.isNearBottom) {
+                                message.read = true
+                            }
+                        }
+                    }
                 }
             }
 
@@ -184,7 +192,8 @@ Item {
                     "id": "streaming",
                     "role": "assistant",
                     "content": root.currentResponse,
-                    "isStreaming": true
+                    "isStreaming": true,
+                    "read": true
                 })
             }
         }

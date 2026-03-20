@@ -154,6 +154,7 @@ Item {
               "id": id,
               "role": msg.role,
               "content": msg.content,
+              "read": true,
               "timestamp": msg.timestamp || ""
             });
             id = msg.parentId || null;

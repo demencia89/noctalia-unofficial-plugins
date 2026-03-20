@@ -17,6 +17,7 @@ Item {
     implicitWidth: parent ? parent.width : 400
 
     property bool isHovered: false
+    property bool isRead: message.read === true
 
     RowLayout {
         id: mainLayout
@@ -78,7 +79,29 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 acceptedButtons: Qt.NoButton
-                onContainsMouseChanged: root.isHovered = containsMouse
+                onContainsMouseChanged: {
+                    root.isHovered = containsMouse
+                    if (containsMouse && !message.read) {
+                        message.read = true
+                    }
+                }
+                onClicked: {
+                    if (!message.read) {
+                        message.read = true
+                    }
+                }
+
+            }
+            Rectangle {
+                visible: !message.read && message.role === "assistant"
+                width: 8
+                height: 8
+                radius: 4
+                color: Color.mPrimary
+
+                anchors.top: parent.top
+                anchors.right: parent.right
+                anchors.margins: 6
             }
 
             // Sharp Corner Hack for User (Top Right)

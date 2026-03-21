@@ -154,6 +154,7 @@ Item {
               "id": id,
               "role": msg.role,
               "content": msg.content,
+              "read": true,
               "timestamp": msg.timestamp || ""
             });
             id = msg.parentId || null;
@@ -405,6 +406,11 @@ Item {
 
   // Reload data when panel becomes visible
   onVisibleChanged: {
+    // Keep mainInstance in sync so it knows whether to auto-open
+    if (mainInstance) {
+      mainInstance.isPanelVisible = visible;
+    }
+
     if (visible && hasToken && baseUrl) {
       // Sync currentChatId from main instance (in case it was loaded from cache)
       if (mainInstance && mainInstance.currentChatId && mainInstance.currentChatId !== currentChatId) {

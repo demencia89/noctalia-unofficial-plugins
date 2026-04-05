@@ -202,3 +202,15 @@ function isChapterRead(readMap, chapterId) {
     }
     return readMap[chapterId] === true;
 }
+
+function buildTargetedRefetchToken(chapterId, pageIdentity, retryCount) {
+    var chapterPart = String(chapterId || "").trim();
+    var pagePart = String(pageIdentity || "").trim();
+    var retryPart = Math.max(0, Math.round(Number(retryCount || 0)));
+
+    if (pagePart === "") {
+        pagePart = "unknown-page";
+    }
+
+    return chapterPart + "::" + pagePart + "::" + String(retryPart) + "::" + String(Date.now());
+}

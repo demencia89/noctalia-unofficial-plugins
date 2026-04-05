@@ -1,7 +1,49 @@
 var _diagnostics = null;
+var _apiStatusCallback = null;
 
 function setDiagnostics(diagnostics) {
     _diagnostics = diagnostics || null;
+}
+
+function setApiStatusCallback(cb) {
+    _apiStatusCallback = cb;
+}
+
+var _apiRequestsActive = 0;
+var _apiRateLimited = 0;
+
+function _updateApiStatusText() {
+    if (typeof _apiStatusCallback !== "function") {
+        return;
+    }
+    if (_apiRateLimited > 0) {
+        _apiStatusCallback("Rate limited (waiting...)");
+    } else if (_apiRequestsActive > 0) {
+        _apiStatusCallback("Fetching " + _apiRequestsActive + " request(s)...");
+    } else {
+        _apiStatusCallback("");
+    }
+}
+
+function _startApiRequest() {
+    _apiRequestsActive++;
+    _updateApiStatusText();
+}
+
+function _endApiRequest() {
+    if (_apiRequestsActive > 0) {
+        _apiRequestsActive--;
+    }
+    _updateApiStatusText();
+}
+
+function _markRateLimited(isLimited) {
+    if (isLimited) {
+        _apiRateLimited++;
+    } else if (_apiRateLimited > 0) {
+        _apiRateLimited--;
+    }
+    _updateApiStatusText();
 }
 
 function _diag(method, eventName, context, message) {
@@ -309,6 +351,8 @@ function requestJson(options, onSuccess, onError) {
     var timerHost = options.timerHost || null;
     var requestId = options.requestId || _requestId();
 
+    _startApiRequest();
+
     var retryCount = 0;
     var finished = false;
 
@@ -335,6 +379,7 @@ function requestJson(options, onSuccess, onError) {
             message: enriched.message || ""
         }), "API request failed");
 
+        _endApiRequest();
         finished = true;
         onError(enriched);
     }
@@ -353,6 +398,7 @@ function requestJson(options, onSuccess, onError) {
             durationMs: Math.round(durationMs || 0)
         }), "API request completed");
 
+        _endApiRequest();
         finished = true;
         onSuccess(payload || {});
     }
@@ -408,6 +454,11 @@ function requestJson(options, onSuccess, onError) {
                     return;
                 }
 
+                var isRateLimited = enrichedError.status === 429;
+                if (isRateLimited) {
+                    _markRateLimited(true);
+                }
+
                 var nextDelayMs = _computeBackoffMs(enrichedError, retryCount, backoffBaseMs);
                 _diag("warn", "api.request.retry", _diagChild(options.context || {}, {
                     requestId: requestId,
@@ -420,7 +471,17 @@ function requestJson(options, onSuccess, onError) {
                 }), "Retrying API request after retriable failure");
 
                 retryCount += 1;
-                executeRequest(nextDelayMs, "retry");
+                
+                // if it was rate limited, we wait nextDelayMs, then un-mark it when executing
+                var origExecute = executeRequest;
+                if (isRateLimited) {
+                    _schedule(nextDelayMs, timerHost, function() {
+                        _markRateLimited(false);
+                        origExecute(0, "retry");
+                    });
+                } else {
+                    executeRequest(nextDelayMs, "retry");
+                }
             }
 
             try {
@@ -597,14 +658,31 @@ function getMangaFeed(mangaId, offset, limit, filters, accessToken, onSuccess, o
 }
 
 function getAtHomeServer(chapterId, forcePort443, onSuccess, onError, requestOptions) {
+    var params = {
+        forcePort443: forcePort443 ? "true" : "false"
+    };
+
+    var skipCacheToken = requestOptions && requestOptions.skipCacheToken !== undefined
+        ? String(requestOptions.skipCacheToken || "").trim()
+        : "";
+
+    if (skipCacheToken !== "") {
+        params.forceRefresh = "true";
+        params.cacheBust = skipCacheToken;
+
+        _diag("info", "api.at_home.cache_bypass", {
+            chapterId: chapterId,
+            hasToken: true
+        }, "Issuing At-Home request with explicit cache bypass token");
+    }
+
     requestJson(_mergeRequestOptions({
         path: "/at-home/server/" + encodeURIComponent(chapterId),
-        query: {
-            forcePort443: forcePort443 ? "true" : "false"
-        }
+        query: params
     }, requestOptions, {
         endpoint: "at-home-server",
-        chapterId: chapterId
+        chapterId: chapterId,
+        bypassCache: skipCacheToken !== ""
     }), onSuccess, onError);
 }
 

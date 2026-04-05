@@ -5,6 +5,7 @@ import Quickshell
 import qs.Commons
 import qs.Widgets
 import "Diagnostics.js" as Diagnostics
+import "core/ReaderRecovery.js" as ReaderRecovery
 import "utils/IconResolver.js" as IconResolver
 import "components" as Components
 
@@ -329,9 +330,6 @@ Item {
 
     function onPageUrlsChanged() {
       Qt.callLater(updateVisiblePages);
-      if (mainInstance?.bumpReaderRenderEpoch) {
-        mainInstance.bumpReaderRenderEpoch("page_model_changed", false);
-      }
       scheduleAnchorRestore("page_model_changed", 160);
       Diagnostics.debug("reader.viewport.model_changed", {
         chapterId: mainInstance?.currentChapter?.id || "",
@@ -341,15 +339,25 @@ Item {
 
     function onCurrentChapterChanged() {
       Qt.callLater(updateVisiblePages);
-      if (mainInstance?.bumpReaderRenderEpoch) {
-        mainInstance.bumpReaderRenderEpoch("chapter_changed", false);
-      }
       scheduleAnchorRestore("chapter_changed", 180);
     }
 
     function onReaderRenderEpochChanged() {
       Qt.callLater(updateVisiblePages);
       scheduleAnchorRestore("render_epoch_changed", 120);
+    }
+
+    function onReaderTransitionSettleEpochChanged() {
+      Qt.callLater(function() {
+        updateVisiblePages();
+        scheduleAnchorRestore("transition_settle", 140);
+        var recoveredCount = recoverVisibleLoadingPages("transition_settle");
+        Diagnostics.debug("reader.transition.reconcile", {
+          chapterId: mainInstance?.currentChapter?.id || "",
+          recoveredCount: recoveredCount,
+          settleEpoch: mainInstance?.readerTransitionSettleEpoch || 0
+        }, "Ran post-settle viewport reconciliation");
+      });
     }
   }
 
@@ -568,33 +576,43 @@ Item {
               Layout.preferredHeight: 20
               color: Qt.alpha(Style.capsuleBorderColor, 0.5)
             }
-
-            NIconButton {
-              icon: resolveControlIcon("sliders", "adjustments-horizontal")
-              tooltipText: root.minimalControls ? "Expanded controls" : "Minimal controls"
-              onClicked: root.setMinimalControls(!root.minimalControls)
-            }
           }
 
-          // Center - Chapter label
-          NText {
+          // Center - Chapter label and API Status
+          ColumnLayout {
             Layout.fillWidth: true
-            text: mainInstance?.currentChapter
-                ? mainInstance.chapterLabel(mainInstance.currentChapter)
-                : "No chapter selected"
-            color: Color.mOnSurface
-            pointSize: Style.fontSizeS
-            elide: Text.ElideMiddle
-            horizontalAlignment: Text.AlignHCenter
+            spacing: 0
+            
+            NText {
+              Layout.fillWidth: true
+              text: mainInstance?.currentChapter
+                  ? mainInstance.chapterLabel(mainInstance.currentChapter)
+                  : "No chapter selected"
+              color: Color.mOnSurface
+              pointSize: Style.fontSizeS
+              elide: Text.ElideMiddle
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            NText {
+              Layout.fillWidth: true
+              visible: mainInstance?.showApiStatus && mainInstance?.apiStatusText !== ""
+              text: mainInstance?.apiStatusText || ""
+              color: Color.mPrimary
+              pointSize: Style.fontSizeXS
+              elide: Text.ElideMiddle
+              horizontalAlignment: Text.AlignHCenter
+            }
           }
 
           // Right group
           RowLayout {
             spacing: Style.marginXS
 
-            NIconButton {
-              icon: resolveControlIcon("image", "settings")
-              tooltipText: "Quality: " + (mainInstance?.qualityMode || "data-saver")
+            NButton {
+              text: mainInstance?.qualityMode === "data" ? "High Quality" : "Data Saver"
+              icon: mainInstance?.qualityMode === "data" ? resolveControlIcon("photo-up", "image") : resolveControlIcon("photo-down", "image")
+              tooltipText: "Toggle Image Quality"
               onClicked: {
                 if (mainInstance) {
                   mainInstance.qualityMode = mainInstance.qualityMode === "data" ? "data-saver" : "data";
@@ -1191,14 +1209,26 @@ Item {
                      property var slotState: {
                        var revisionToken = slotRevision;
                        if (revisionToken < 0) {
-                         return ({ status: "loading", failureCount: 0, lastError: "" });
+                         return ({ status: "loading", retryCount: 0, failureCount: 0, lastError: "", updatedAtMs: 0 });
                        }
                        return mainInstance?.getPageSlotState
                            ? mainInstance.getPageSlotState(modelData, index)
-                           : ({ status: "loading", failureCount: 0, lastError: "" });
+                           : ({ status: "loading", retryCount: 0, failureCount: 0, lastError: "", updatedAtMs: 0 });
                      }
                      property string slotStatus: String(slotState.status || "loading")
                      property bool slotRecoverable: slotStatus === "error" || slotStatus === "stale"
+                     property int slotRetryCount: Number(slotState.retryCount || slotState.failureCount || 0)
+                     property int slotUpdatedAtMs: Number(slotState.updatedAtMs || 0)
+                     property int slotClockMs: Date.now()
+                     property bool slotLoadingStalled: slotStatus === "loading"
+                         && imageSource !== ""
+                         && (inViewport || keepLoaded)
+                       && Math.max(0, slotClockMs - slotUpdatedAtMs) >= Number(mainInstance?.readerTransitionStuckThresholdMs || 2500)
+                     property bool slotForceFetchVisible: slotRecoverable || slotLoadingStalled
+                     property bool slotRefetchPending: mainInstance?.isPageRefetchPending
+                         ? mainInstance.isPageRefetchPending(modelData, index)
+                         : !!mainInstance?.chapterRecoveryInProgress
+                     property bool showChangeQualityAction: slotForceFetchVisible && slotRetryCount > 1
                      property bool keepLoaded: {
                        var revisionToken = cacheRevision;
                        if (revisionToken < 0) {
@@ -1214,11 +1244,24 @@ Item {
                          ? (pageImage.implicitHeight / pageImage.implicitWidth)
                          : 1.45
                      readonly property real resolvedImageHeight: Math.max(120, resolvedImageWidth * resolvedImageRatio)
+                     readonly property int imageStatus: pageImage.status
 
                      width: pageColumn.width
                      height: resolvedImageHeight + imageMargin * 2
 
+                     Timer {
+                       interval: 1000
+                       running: true
+                       repeat: true
+                       onTriggered: pageItem.slotClockMs = Date.now()
+                     }
+
                      onRenderEpochChanged: {
+                       var remountReason = String(mainInstance?.lastReaderRecoveryReason || "");
+                       if (!ReaderRecovery.shouldResetSourceForReason(remountReason)) {
+                         return;
+                       }
+
                        if (mainInstance?.markPageSlotLoading) {
                          mainInstance.markPageSlotLoading(modelData, index, "render-epoch-remount");
                        }
@@ -1248,6 +1291,14 @@ Item {
                            pageIndex: index,
                            source: originalSource
                          }, "Page entered viewport activation window");
+
+                         if (pageItem.imageSource !== "" && pageImage.status !== Image.Ready) {
+                           var rebound = pageItem.imageSource;
+                           pageItem.imageSource = "";
+                           Qt.callLater(function() {
+                             pageItem.imageSource = rebound;
+                           });
+                         }
                        }
                      }
 
@@ -1346,11 +1397,31 @@ Item {
                        visible: pageImage.source !== "" && pageImage.status !== Image.Ready && !pageItem.slotRecoverable
                        color: Qt.alpha(Color.mSurface, 0.42)
 
-                       NText {
+                       ColumnLayout {
                          anchors.centerIn: parent
-                         text: "Loading page..."
-                         pointSize: Style.fontSizeXS
-                         color: Color.mOnSurfaceVariant
+                         spacing: Style.marginS
+
+                         NText {
+                           Layout.alignment: Qt.AlignHCenter
+                           text: pageItem.slotLoadingStalled ? "Loading is taking longer than expected" : "Loading page..."
+                           pointSize: Style.fontSizeXS
+                           color: Color.mOnSurfaceVariant
+                           horizontalAlignment: Text.AlignHCenter
+                         }
+
+                         Components.PageRefetchAction {
+                           Layout.alignment: Qt.AlignHCenter
+                           visibleAction: pageItem.slotLoadingStalled
+                           actionIcon: resolveControlIcon("refresh", "settings")
+                           actionLabel: "Force Fetch"
+                           actionEnabled: !pageItem.slotRefetchPending
+                           busy: pageItem.slotRefetchPending
+                           onTriggered: {
+                             if (mainInstance?.requestPageRefetch) {
+                               mainInstance.requestPageRefetch(modelData, pageItem.index, "manual_refetch");
+                             }
+                           }
+                         }
                        }
                      }
 
@@ -1384,12 +1455,32 @@ Item {
 
                          Components.PageRefetchAction {
                            Layout.alignment: Qt.AlignHCenter
-                           visibleAction: pageItem.slotRecoverable
+                           visibleAction: pageItem.slotForceFetchVisible
                            actionIcon: resolveControlIcon("refresh", "settings")
-                           actionLabel: "Refetch this page"
+                           actionLabel: "Force Fetch"
+                           actionEnabled: !pageItem.slotRefetchPending
+                           busy: pageItem.slotRefetchPending
                            onTriggered: {
                              if (mainInstance?.requestPageRefetch) {
                                mainInstance.requestPageRefetch(modelData, pageItem.index, "manual_refetch");
+                             }
+                           }
+                         }
+
+                         Components.PageRefetchAction {
+                           Layout.alignment: Qt.AlignHCenter
+                           visibleAction: pageItem.showChangeQualityAction
+                           actionIcon: mainInstance?.qualityMode === "data"
+                               ? resolveControlIcon("photo-down", "image")
+                               : resolveControlIcon("photo-up", "image")
+                           actionLabel: mainInstance?.qualityMode === "data"
+                               ? "Change Quality (Data Saver)"
+                               : "Change Quality (High)"
+                           actionEnabled: !pageItem.slotRefetchPending
+                           busy: pageItem.slotRefetchPending
+                           onTriggered: {
+                             if (mainInstance?.requestPageRefetchWithQualityToggle) {
+                               mainInstance.requestPageRefetchWithQualityToggle(modelData, pageItem.index, "manual_quality_refetch");
                              }
                            }
                          }
@@ -1498,6 +1589,55 @@ Item {
          }
        }
      }
+   }
+
+   function recoverVisibleLoadingPages(reason) {
+     if (!readerScroll || !readerScroll.visible || !pageRepeater || !mainInstance || !mainInstance.requestTransitionSettledPageRecovery) {
+       return 0;
+     }
+
+     var inspectedCount = 0;
+     var recoveredCount = 0;
+     var thresholdMs = Number(mainInstance?.readerTransitionStuckThresholdMs || 2500);
+
+     for (var i = 0; i < pageRepeater.count; i++) {
+       var item = pageRepeater.itemAt(i);
+       if (!item || !item.inViewport) {
+         continue;
+       }
+
+       inspectedCount++;
+       var ageMs = Math.max(0, Number(item.slotClockMs || Date.now()) - Number(item.slotUpdatedAtMs || 0));
+       var shouldRecover = item.slotStatus === "loading"
+           && item.imageSource !== ""
+           && !item.slotRefetchPending
+           && item.imageStatus !== Image.Ready
+           && ageMs >= thresholdMs;
+       if (!shouldRecover) {
+         continue;
+       }
+
+       var started = mainInstance.requestTransitionSettledPageRecovery(
+         item.modelData,
+         item.index,
+         reason || "transition_settle_recovery",
+         item.slotUpdatedAtMs);
+       if (started) {
+         recoveredCount++;
+       }
+     }
+
+     if (recoveredCount > 0) {
+       Diagnostics.warn("reader.transition.reconcile.recovery", {
+         chapterId: mainInstance?.currentChapter?.id || "",
+         inspectedCount: inspectedCount,
+         recoveredCount: recoveredCount,
+         thresholdMs: thresholdMs,
+         reason: String(reason || "transition_settle_recovery")
+       }, "Requested targeted recovery for visible pages stuck loading after transition settle");
+     }
+
+     return recoveredCount;
    }
 
    // Function to update which pages are visible based on scroll position

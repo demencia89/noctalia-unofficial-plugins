@@ -39,7 +39,10 @@
         "minimalControls": true,
         "utilityCollapsed": false,
         "pageCacheMaxEntries": 80,
-        "pageCachePerChapterMaxEntries": 30
+        "pageCachePerChapterMaxEntries": 30,
+        "showApiStatus": false,
+        "transitionSettleMs": 1100,
+        "transitionStuckThresholdMs": 2600
       },
       "network": {
         "searchPageSize": 20,
@@ -49,7 +52,7 @@
         "retryBaseDelayMs": 400
       },
       "diagnostics": {
-        "loggingMode": "normal"
+        "loggingMode": "off"
       }
     }
   }

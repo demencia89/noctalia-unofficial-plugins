@@ -24,6 +24,9 @@ function testMainQmlContracts() {
   assert.equal(mainQml.includes("function registerPageImageReady("), true, "Main.qml should register successful image loads in cache");
   assert.equal(mainQml.includes("function invalidatePageCacheEntry("), true, "Main.qml should invalidate corrupt cache entries");
   assert.equal(mainQml.includes("function attemptTargetedPageRecovery("), true, "Main.qml should support targeted page recovery");
+    assert.equal(mainQml.includes("property string pendingRefetchSlotKey"), true, "Main.qml should track pending per-slot force fetch state");
+    assert.equal(mainQml.includes("function isPageRefetchPending("), true, "Main.qml should expose pending-state helper for refetch actions");
+    assert.equal(mainQml.includes("function requestPageRefetchWithQualityToggle("), true, "Main.qml should expose quality-toggle refetch helper");
 
   assert.equal(mainQml.includes("chapter.image_failure.targeted_recovery.start"), true, "Main.qml should emit targeted recovery diagnostics");
   assert.equal(mainQml.includes("readerAnchor: readerViewportAnchor"), true, "Main.qml should persist reader anchor in state cache");
@@ -45,6 +48,8 @@ function testPanelQmlContracts() {
   assert.equal(panelQml.includes("mainInstance.touchPageCacheEntry"), true, "Panel.qml should touch cache entries on viewport access");
   assert.equal(panelQml.includes("mainInstance.registerPageImageReady"), true, "Panel.qml should register successful page image loads");
   assert.equal(panelQml.includes("mainInstance.invalidatePageCacheEntry"), true, "Panel.qml should invalidate cache entries on image errors");
+    assert.equal(panelQml.includes("slotLoadingStalled"), true, "Panel.qml should detect stalled loading pages");
+    assert.equal(panelQml.includes("showChangeQualityAction"), true, "Panel.qml should reveal quality action after repeated failures");
 }
 
 function testReaderSmokeContracts() {

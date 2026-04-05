@@ -66,7 +66,7 @@ function testMainAndPanelIntegration() {
 
   assert.equal(panelQml.includes('import "utils/IconResolver.js" as IconResolver'), true, "Panel.qml should import icon resolver module");
   assert.equal(panelQml.includes('import "components" as Components'), true, "Panel.qml should import components module namespace");
-  assert.equal(panelQml.includes('icon: resolveControlIcon("sliders", "adjustments-horizontal")'), true, "Panel.qml should resolve unsupported sliders icon through fallback mapping");
+  assert.equal(panelQml.includes('actionIcon: resolveControlIcon("refresh", "settings")'), true, "Panel.qml should resolve refetch action icon through icon resolver helper");
   assert.equal(panelQml.includes("Components.PageRefetchAction"), true, "Panel.qml should provide manual page refetch action");
   assert.equal(panelQml.includes("mainInstance.requestPageRefetch(modelData, pageItem.index, \"manual_refetch\")"), true, "Panel.qml should trigger manual per-page refetch");
   assert.equal(panelQml.includes("onRenderEpochChanged"), true, "Panel.qml should respond to render epoch remount events");
@@ -132,6 +132,7 @@ function testIconResolverAndSlotModelHelpers() {
   const withError = slotModel.setSlotState(hydrated, key, { status: "error", failureCount: 1, lastError: "boom" });
   const recovered = slotModel.getSlotState(withError, key);
   assert.equal(recovered.status, "error", "slot state updates should persist status");
+  assert.equal(recovered.retryCount, 1, "slot state updates should surface retryCount for repeated failures");
   assert.equal(recovered.failureCount, 1, "slot state updates should persist failure count");
 
   assert.equal(recovery.nextRenderEpoch(2), 3, "render epoch helper should increment epochs");

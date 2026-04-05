@@ -86,6 +86,19 @@ function setSlotState(sourceMap, slotKey, patch) {
         }
     }
 
+    var parsedRetryCount = Number(nextEntry.retryCount);
+    var parsedFailureCount = Number(nextEntry.failureCount);
+
+    if (isNaN(parsedRetryCount)) {
+        parsedRetryCount = isNaN(parsedFailureCount) ? 0 : parsedFailureCount;
+    }
+    if (isNaN(parsedFailureCount)) {
+        parsedFailureCount = parsedRetryCount;
+    }
+
+    nextEntry.retryCount = Math.max(0, parsedRetryCount);
+    nextEntry.failureCount = Math.max(0, parsedFailureCount);
+
     nextEntry.status = normalizeStatus(nextEntry.status);
     nextEntry.updatedAtMs = Number(Date.now());
     nextMap[key] = nextEntry;
@@ -111,6 +124,7 @@ function hydrateForEntries(sourceMap, chapterId, entries) {
             pageIdentity: String(entry?.pageIdentity || "").trim(),
             source: String(entry?.source || "").trim(),
             lastError: existing ? String(existing.lastError || "") : "",
+            retryCount: existing ? Number(existing.retryCount || existing.failureCount || 0) : 0,
             failureCount: existing ? Number(existing.failureCount || 0) : 0,
             updatedAtMs: Number(Date.now())
         };
@@ -125,6 +139,7 @@ function getSlotState(sourceMap, slotKey) {
     if (key === "" || !map[key] || typeof map[key] !== "object") {
         return {
             status: STATE_LOADING,
+            retryCount: 0,
             failureCount: 0,
             lastError: ""
         };
@@ -133,6 +148,7 @@ function getSlotState(sourceMap, slotKey) {
     var entry = map[key];
     return {
         status: normalizeStatus(entry.status),
+        retryCount: Number(entry.retryCount || entry.failureCount || 0),
         failureCount: Number(entry.failureCount || 0),
         lastError: String(entry.lastError || ""),
         updatedAtMs: Number(entry.updatedAtMs || 0)

@@ -45,6 +45,15 @@ ColumnLayout {
   property bool valueUtilityCollapsed: pluginApi?.pluginSettings?.reader?.utilityCollapsed
       ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.utilityCollapsed
       ?? false
+  property bool valueShowApiStatus: pluginApi?.pluginSettings?.reader?.showApiStatus
+      ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.showApiStatus
+      ?? false
+    property int valueTransitionSettleMs: Number(pluginApi?.pluginSettings?.reader?.transitionSettleMs
+      ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.transitionSettleMs
+      ?? 1100)
+    property int valueTransitionStuckThresholdMs: Number(pluginApi?.pluginSettings?.reader?.transitionStuckThresholdMs
+      ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.transitionStuckThresholdMs
+      ?? 2600)
 
   property string valueQuality: pluginApi?.pluginSettings?.reader?.quality ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.quality ?? "data-saver"
   property string valuePreferredLanguage: pluginApi?.pluginSettings?.reader?.preferredLanguage ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.preferredLanguage ?? "en"
@@ -77,7 +86,7 @@ ColumnLayout {
     property string valueLoggingMode: normalizeDiagnosticsMode(
       pluginApi?.pluginSettings?.diagnostics?.loggingMode
       ?? pluginApi?.manifest?.metadata?.defaultSettings?.diagnostics?.loggingMode
-      ?? "normal")
+      ?? "off")
 
   readonly property bool widthIsValid: valuePanelWidth >= valuePanelWidthMin && valuePanelWidth <= valuePanelWidthMax
 
@@ -165,6 +174,11 @@ ColumnLayout {
     pluginApi.pluginSettings.panelHeight = Math.max(480, Number(valuePanelHeight));
     pluginApi.pluginSettings.reader.minimalControls = valueMinimalControls;
     pluginApi.pluginSettings.reader.utilityCollapsed = valueUtilityCollapsed;
+    pluginApi.pluginSettings.reader.showApiStatus = valueShowApiStatus;
+    pluginApi.pluginSettings.reader.transitionSettleMs = Math.max(250, Math.min(5000, Number(valueTransitionSettleMs)));
+    pluginApi.pluginSettings.reader.transitionStuckThresholdMs = Math.max(
+      pluginApi.pluginSettings.reader.transitionSettleMs + 300,
+      Math.min(12000, Number(valueTransitionStuckThresholdMs)));
   }
 
   function triggerSettingsLogin(passwordValue) {
@@ -929,6 +943,61 @@ ColumnLayout {
           NToggle {
             checked: valueUtilityCollapsed
             onToggled: checked => valueUtilityCollapsed = checked
+          }
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 1
+          color: Qt.alpha(Style.capsuleBorderColor, 0.3)
+        }
+
+        SettingRow {
+          label: "Show API Status"
+          description: "Display network fetch status in top bar"
+
+          NToggle {
+            checked: valueShowApiStatus
+            onToggled: checked => valueShowApiStatus = checked
+          }
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 1
+          color: Qt.alpha(Style.capsuleBorderColor, 0.3)
+        }
+
+        SettingRow {
+          label: "Transition settle"
+          description: "Coalesce panel resize animation updates before remount (ms)"
+
+          StyledField {
+            Layout.preferredWidth: 90
+            text: String(valueTransitionSettleMs)
+            validator: IntValidator { bottom: 250; top: 5000 }
+            onEditingFinished: valueTransitionSettleMs = Math.max(250, Math.min(5000, Number(text)))
+          }
+        }
+
+        Rectangle {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 1
+          color: Qt.alpha(Style.capsuleBorderColor, 0.3)
+        }
+
+        SettingRow {
+          label: "Loading recovery threshold"
+          description: "Trigger visible page recovery if loading exceeds this age (ms)"
+
+          StyledField {
+            Layout.preferredWidth: 90
+            text: String(valueTransitionStuckThresholdMs)
+            validator: IntValidator { bottom: 600; top: 12000 }
+            onEditingFinished: {
+              var minThreshold = Math.max(600, valueTransitionSettleMs + 300);
+              valueTransitionStuckThresholdMs = Math.max(minThreshold, Math.min(12000, Number(text)));
+            }
           }
         }
       }

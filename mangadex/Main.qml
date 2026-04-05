@@ -47,7 +47,7 @@ Item {
     readonly property string diagnosticsModeSetting: normalizeDiagnosticsMode(
       pluginApi?.pluginSettings?.diagnostics?.loggingMode,
       pluginApi?.manifest?.metadata?.defaultSettings?.diagnostics?.loggingMode,
-      "normal")
+      "off")
 
     readonly property string configuredPanelPosition: pluginApi?.pluginSettings?.panelPosition ?? pluginApi?.manifest?.metadata?.defaultSettings?.panelPosition ?? "right"
     readonly property string panelSide: normalizePanelSide(configuredPanelPosition)
@@ -61,6 +61,15 @@ Item {
       Number(pluginApi?.pluginSettings?.panelHeight ?? pluginApi?.manifest?.metadata?.defaultSettings?.panelHeight ?? 760)) * Style.uiScaleRatio
     readonly property bool readerMinimalControls: pluginApi?.pluginSettings?.reader?.minimalControls ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.minimalControls ?? true
     readonly property bool readerUtilityCollapsed: pluginApi?.pluginSettings?.reader?.utilityCollapsed ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.utilityCollapsed ?? false
+    readonly property bool showApiStatus: pluginApi?.pluginSettings?.reader?.showApiStatus ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.showApiStatus ?? false
+    readonly property int readerTransitionSettleMs: Math.max(250, Math.min(5000,
+      Number(pluginApi?.pluginSettings?.reader?.transitionSettleMs
+          ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.transitionSettleMs
+          ?? 1100)))
+    readonly property int readerTransitionStuckThresholdMs: Math.max(readerTransitionSettleMs + 300, Math.min(12000,
+      Number(pluginApi?.pluginSettings?.reader?.transitionStuckThresholdMs
+          ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.transitionStuckThresholdMs
+          ?? 2600)))
     readonly property int pageCacheMaxEntries: Math.max(20,
       Number(pluginApi?.pluginSettings?.reader?.pageCacheMaxEntries
           ?? pluginApi?.manifest?.metadata?.defaultSettings?.reader?.pageCacheMaxEntries
@@ -119,10 +128,12 @@ Item {
   property var pageUrls: []
   property bool isLoadingPages: false
   property string readerError: ""
+  property string apiStatusText: ""
   property bool chapterRetryUsed: false
   property bool chapterQualityFallbackUsed: false
   property bool chapterTargetedRetryUsed: false
   property bool chapterRecoveryInProgress: false
+  property string pendingRefetchSlotKey: ""
   property int chapterLoadToken: 0
   property string chapterLoadState: "idle"
   property string qualityMode: defaultQualityMode
@@ -141,6 +152,13 @@ Item {
   property int pageImageCacheRevision: 0
   property var pageSlotStates: ({})
   property int pageSlotRevision: 0
+  property bool readerTransitionActive: false
+  property int readerTransitionToken: 0
+  property int readerTransitionSuppressedCount: 0
+  property bool readerTransitionPendingRemount: false
+  property string readerTransitionLastReason: ""
+  property int readerTransitionSettleEpoch: 0
+  property var transitionRecoveryAttempts: ({})
 
   // Sync state
   property var readMarkers: ({})
@@ -159,6 +177,11 @@ Item {
     ensureCacheDir();
     initializeSettingsContainers();
     applyDiagnosticsMode(diagnosticsModeSetting);
+
+    MangaDexApi.setApiStatusCallback(function(text) {
+        apiStatusText = text;
+    });
+
     Diagnostics.info("plugin.initialized", {
       loggingMode: Diagnostics.getMode(),
       requestPacingMs: requestPacingMs,
@@ -258,6 +281,13 @@ Item {
     onTriggered: performSaveState()
   }
 
+  Timer {
+    id: readerTransitionSettleTimer
+    interval: root.readerTransitionSettleMs
+    repeat: false
+    onTriggered: settleReaderTransition("timer")
+  }
+
   // --------------------
   // Helper utilities
   // --------------------
@@ -317,12 +347,7 @@ Item {
     return sourceList.slice(0);
   }
 
-  function bumpReaderRenderEpoch(reason, persistState) {
-    var normalizedReason = ReaderRecovery.normalizeRecoveryReason(reason);
-    if (!ReaderRecovery.shouldRemountForReason(normalizedReason)) {
-      return;
-    }
-
+  function performReaderRenderEpochBump(normalizedReason, persistState) {
     readerRenderEpoch = ReaderRecovery.nextRenderEpoch(readerRenderEpoch);
     lastReaderRecoveryReason = normalizedReason;
 
@@ -337,9 +362,102 @@ Item {
     }
   }
 
+  function beginReaderTransition(reason) {
+    var normalizedReason = ReaderRecovery.normalizeRecoveryReason(reason);
+    if (!readerTransitionActive) {
+      readerTransitionActive = true;
+      readerTransitionToken = readerTransitionToken + 1;
+      readerTransitionSuppressedCount = 0;
+      readerTransitionPendingRemount = false;
+      Diagnostics.info("reader.transition.start", {
+        chapterId: currentChapter?.id || "",
+        transitionToken: readerTransitionToken,
+        reason: normalizedReason,
+        settleMs: readerTransitionSettleMs
+      }, "Reader transition session started");
+    }
+
+    readerTransitionLastReason = normalizedReason;
+    readerTransitionSettleTimer.interval = readerTransitionSettleMs;
+    readerTransitionSettleTimer.restart();
+  }
+
+  function clearReaderTransition(emitSettleEpoch) {
+    readerTransitionActive = false;
+    readerTransitionPendingRemount = false;
+    readerTransitionSuppressedCount = 0;
+    readerTransitionLastReason = "";
+    readerTransitionSettleTimer.stop();
+
+    if (emitSettleEpoch) {
+      readerTransitionSettleEpoch = readerTransitionSettleEpoch + 1;
+    }
+  }
+
+  function settleReaderTransition(triggerReason) {
+    if (!readerTransitionActive && !readerTransitionPendingRemount) {
+      return;
+    }
+
+    var suppressedCount = Number(readerTransitionSuppressedCount || 0);
+    var pendingRemount = !!readerTransitionPendingRemount;
+    var transitionToken = Number(readerTransitionToken || 0);
+    var lastReason = String(readerTransitionLastReason || "");
+
+    clearReaderTransition(true);
+
+    Diagnostics.info("reader.transition.settle", {
+      chapterId: currentChapter?.id || "",
+      transitionToken: transitionToken,
+      trigger: String(triggerReason || "timer"),
+      suppressedCount: suppressedCount,
+      pendingRemount: pendingRemount,
+      lastReason: lastReason
+    }, "Reader transition session settled");
+
+    if (pendingRemount) {
+      performReaderRenderEpochBump("layout_settled", false);
+    }
+  }
+
+  function bumpReaderRenderEpoch(reason, persistState) {
+    var normalizedReason = ReaderRecovery.normalizeRecoveryReason(reason);
+    if (!ReaderRecovery.shouldRemountForReason(normalizedReason)) {
+      return;
+    }
+
+    if (ReaderRecovery.isTransitionNoiseReason(normalizedReason)) {
+      beginReaderTransition(normalizedReason);
+      readerTransitionPendingRemount = true;
+      readerTransitionSuppressedCount = Number(readerTransitionSuppressedCount || 0) + 1;
+
+      Diagnostics.debug("reader.render_epoch.suppressed", {
+        chapterId: currentChapter?.id || "",
+        reason: normalizedReason,
+        transitionToken: readerTransitionToken,
+        suppressedCount: readerTransitionSuppressedCount,
+        settleMs: readerTransitionSettleMs
+      }, "Suppressed transition-noise render epoch bump until settle");
+      return;
+    }
+
+    if (readerTransitionActive && ReaderRecovery.isCriticalRemountReason(normalizedReason)) {
+      Diagnostics.warn("reader.render_epoch.critical_bypass", {
+        chapterId: currentChapter?.id || "",
+        reason: normalizedReason,
+        transitionToken: readerTransitionToken,
+        pendingSuppressedCount: readerTransitionSuppressedCount
+      }, "Critical render reason bypassed transition suppression");
+      clearReaderTransition(false);
+    }
+
+    performReaderRenderEpochBump(normalizedReason, persistState);
+  }
+
   function resetPageSlotStates(reason) {
     pageSlotStates = ({});
     pageSlotRevision = pageSlotRevision + 1;
+    transitionRecoveryAttempts = ({});
 
     Diagnostics.debug("reader.page_slots.reset", {
       chapterId: currentChapter?.id || "",
@@ -376,16 +494,17 @@ Item {
 
     var previous = PageSlotModel.getSlotState(pageSlotStates, slotKey);
     var normalizedStatus = PageSlotModel.normalizeStatus(statusValue);
-    var nextFailureCount = Number(previous.failureCount || 0);
+    var nextRetryCount = Number(previous.retryCount || previous.failureCount || 0);
     if (normalizedStatus === "error" || normalizedStatus === "stale") {
-      nextFailureCount += 1;
+      nextRetryCount += 1;
     } else if (normalizedStatus === "ready") {
-      nextFailureCount = 0;
+      nextRetryCount = 0;
     }
 
     pageSlotStates = PageSlotModel.setSlotState(pageSlotStates, slotKey, {
       status: normalizedStatus,
-      failureCount: nextFailureCount,
+      retryCount: nextRetryCount,
+      failureCount: nextRetryCount,
       lastError: String(errorText || ""),
       source: String(sourceUrl || "")
     });
@@ -395,6 +514,19 @@ Item {
   function getPageSlotState(pageEntry, fallbackIndex) {
     var slotKey = pageSlotKeyForEntry(pageEntry, fallbackIndex);
     return PageSlotModel.getSlotState(pageSlotStates, slotKey);
+  }
+
+  function isPageRefetchPending(pageEntry, fallbackIndex) {
+    if (!chapterRecoveryInProgress) {
+      return false;
+    }
+
+    var slotKey = pageSlotKeyForEntry(pageEntry, fallbackIndex);
+    if (slotKey === "") {
+      return true;
+    }
+
+    return pendingRefetchSlotKey === slotKey;
   }
 
   function markPageSlotLoading(pageEntry, fallbackIndex, reasonText) {
@@ -781,6 +913,16 @@ Item {
       touched = true;
     }
 
+    if (pluginApi.pluginSettings.reader.transitionSettleMs === undefined) {
+      pluginApi.pluginSettings.reader.transitionSettleMs = readerTransitionSettleMs;
+      touched = true;
+    }
+
+    if (pluginApi.pluginSettings.reader.transitionStuckThresholdMs === undefined) {
+      pluginApi.pluginSettings.reader.transitionStuckThresholdMs = readerTransitionStuckThresholdMs;
+      touched = true;
+    }
+
     if (pluginApi.pluginSettings.reader.pageCacheMaxEntries === undefined) {
       pluginApi.pluginSettings.reader.pageCacheMaxEntries = pageCacheMaxEntries;
       touched = true;
@@ -809,7 +951,7 @@ Item {
     var normalizedLoggingMode = normalizeDiagnosticsMode(
         pluginApi.pluginSettings?.diagnostics?.loggingMode,
         diagnosticsModeSetting,
-        "normal");
+        "off");
     if (pluginApi.pluginSettings.diagnostics.loggingMode !== normalizedLoggingMode) {
       pluginApi.pluginSettings.diagnostics.loggingMode = normalizedLoggingMode;
       touched = true;
@@ -1502,6 +1644,23 @@ Item {
       label: ReaderService.chapterLabel(chapter)
     }, "Opening chapter");
 
+    var sameChapter = currentChapter && currentChapter.id === chapter.id;
+    var hasResolvedPages = Object.prototype.toString.call(pageUrls) === "[object Array]" && pageUrls.length > 0;
+    if (sameChapter && hasResolvedPages && !isLoadingPages && chapterLoadState === "success") {
+      currentChapter = chapter;
+      chapterRecoveryInProgress = false;
+      pendingRefetchSlotKey = "";
+      readerError = "";
+      chapterTargetedRetryUsed = false;
+      Diagnostics.info("chapter.open.reuse_loaded", {
+        chapterId: chapter.id,
+        pageCount: pageUrls.length,
+        qualityMode: qualityMode
+      }, "Reused loaded chapter state without re-resolving At-Home metadata");
+      saveState();
+      return;
+    }
+
     currentChapter = chapter;
     atHomeMetadata = null;
     pageUrls = [];
@@ -1509,6 +1668,7 @@ Item {
     chapterRetryUsed = false;
     chapterQualityFallbackUsed = false;
     chapterTargetedRetryUsed = false;
+    pendingRefetchSlotKey = "";
     chapterRecoveryInProgress = false;
     chapterLoadState = "loading";
     resetPageSlotStates("open_chapter");
@@ -1923,6 +2083,7 @@ Item {
     }
 
     isLoadingPages = true;
+    pendingRefetchSlotKey = "";
     chapterRecoveryInProgress = true;
     chapterLoadState = "loading";
     atHomeMetadata = null;
@@ -2131,9 +2292,16 @@ Item {
     return true;
   }
 
-  function attemptTargetedPageRecovery(failedUrl, preferredIndex, triggerReason) {
+  function attemptTargetedPageRecovery(failedUrl, preferredIndex, triggerReason, skipCacheToken, refetchSlotKey, allowChapterFallback) {
     if (!currentChapter || !currentChapter.id) {
       return false;
+    }
+
+    var skipCacheTokenValue = String(skipCacheToken || "").trim();
+    var pendingSlotKeyValue = String(refetchSlotKey || "").trim();
+    var shouldChapterFallback = allowChapterFallback !== false;
+    if (pendingSlotKeyValue !== "") {
+      pendingRefetchSlotKey = pendingSlotKeyValue;
     }
 
     var fallbackIndex = Math.round(Number(preferredIndex));
@@ -2163,14 +2331,31 @@ Item {
       pageIdentity: failedEntry.pageIdentity,
       qualityMode: qualityMode,
       reason: String(triggerReason || "auto"),
-      loadToken: recoveryToken
+      loadToken: recoveryToken,
+      forceFresh: skipCacheTokenValue !== "",
+      allowChapterFallback: shouldChapterFallback
     }, "Attempting targeted page recovery without full chapter reset");
+
+    var targetedRequestOptions = createApiRequestOptions("chapter-at-home-targeted", {
+      chapterId: currentChapter.id,
+      failedIndex: failedIndex,
+      failedUrl: String(failedUrl || ""),
+      qualityMode: qualityMode,
+      forceFresh: skipCacheTokenValue !== ""
+    });
+
+    if (skipCacheTokenValue !== "") {
+      targetedRequestOptions.skipCacheToken = skipCacheTokenValue;
+    }
 
     MangaDexApi.getAtHomeServer(
       currentChapter.id,
       true,
       function(responseObj) {
         if (recoveryToken !== chapterLoadToken) {
+          if (pendingSlotKeyValue !== "") {
+            pendingRefetchSlotKey = "";
+          }
           Diagnostics.warn("chapter.image_failure.targeted_recovery.stale", {
             chapterId: currentChapter?.id || "",
             loadToken: recoveryToken,
@@ -2180,6 +2365,9 @@ Item {
         }
 
         chapterRecoveryInProgress = false;
+        if (pendingSlotKeyValue !== "") {
+          pendingRefetchSlotKey = "";
+        }
 
         if (!currentChapter || !currentChapter.id) {
           return;
@@ -2196,8 +2384,15 @@ Item {
             chapterId: currentChapter.id,
             failedIndex: failedIndex,
             pageIdentity: failedEntry.pageIdentity
-          }, "Targeted recovery could not map replacement page; falling back to chapter reload");
-          loadChapterPages(currentChapter.id);
+          }, shouldChapterFallback
+              ? "Targeted recovery could not map replacement page; falling back to chapter reload"
+              : "Targeted recovery could not map replacement page; keeping page-level error state");
+          if (shouldChapterFallback) {
+            loadChapterPages(currentChapter.id);
+          } else {
+            chapterLoadState = "success";
+            markPageSlotError(failedEntry, failedIndex, "targeted-recovery-no-match", failedEntry.source || String(failedUrl || ""));
+          }
           return;
         }
 
@@ -2207,8 +2402,15 @@ Item {
             chapterId: currentChapter.id,
             failedIndex: failedIndex,
             replacementIndex: replacementIndex
-          }, "Targeted recovery produced invalid replacement entry; falling back to chapter reload");
-          loadChapterPages(currentChapter.id);
+          }, shouldChapterFallback
+              ? "Targeted recovery produced invalid replacement entry; falling back to chapter reload"
+              : "Targeted recovery produced invalid replacement entry; keeping page-level error state");
+          if (shouldChapterFallback) {
+            loadChapterPages(currentChapter.id);
+          } else {
+            chapterLoadState = "success";
+            markPageSlotError(failedEntry, failedIndex, "targeted-recovery-invalid-replacement", failedEntry.source || String(failedUrl || ""));
+          }
           return;
         }
 
@@ -2240,27 +2442,35 @@ Item {
       },
       function(errorObj) {
         if (recoveryToken !== chapterLoadToken) {
+          if (pendingSlotKeyValue !== "") {
+            pendingRefetchSlotKey = "";
+          }
           return;
         }
 
         chapterRecoveryInProgress = false;
+        if (pendingSlotKeyValue !== "") {
+          pendingRefetchSlotKey = "";
+        }
         applyRateLimitIfNeeded(errorObj);
         markPageSlotError(failedEntry, failedIndex, "targeted-recovery-failed", failedUrl);
         Diagnostics.error("chapter.image_failure.targeted_recovery.failure", {
           chapterId: currentChapter?.id || "",
           status: Number(errorObj?.status || 0),
           message: errorObj?.message || "",
-          requestId: errorObj?.requestId || ""
-        }, "Targeted page recovery failed; falling back to chapter reload");
-        loadChapterPages(currentChapter.id);
+          requestId: errorObj?.requestId || "",
+          allowChapterFallback: shouldChapterFallback
+        }, shouldChapterFallback
+            ? "Targeted page recovery failed; falling back to chapter reload"
+            : "Targeted page recovery failed; keeping page-level error state");
+        if (shouldChapterFallback) {
+          loadChapterPages(currentChapter.id);
+        } else {
+          chapterLoadState = "success";
+        }
       }
     ,
-    createApiRequestOptions("chapter-at-home-targeted", {
-      chapterId: currentChapter.id,
-      failedIndex: failedIndex,
-      failedUrl: String(failedUrl || ""),
-      qualityMode: qualityMode
-    }));
+    targetedRequestOptions);
 
     return true;
   }
@@ -2287,6 +2497,14 @@ Item {
       return false;
     }
 
+    var targetSlotKey = pageSlotKeyForEntry(targetEntry, resolvedIndex);
+    var slotState = getPageSlotState(targetEntry, resolvedIndex);
+    var retryAttempt = Math.max(1, Number(slotState.retryCount || slotState.failureCount || 0) + 1);
+    var forceFetchToken = ReaderService.buildTargetedRefetchToken(
+      currentChapter.id,
+      targetEntry.pageIdentity || targetEntry.source || "",
+      retryAttempt);
+
     if (chapterRecoveryInProgress) {
       return false;
     }
@@ -2296,15 +2514,135 @@ Item {
     var recoveryStarted = attemptTargetedPageRecovery(
       targetEntry.source || String(pageEntry?.source || ""),
       resolvedIndex,
-      reason || "manual_refetch");
+      reason || "manual_refetch",
+      forceFetchToken,
+      targetSlotKey,
+      false);
 
     if (!recoveryStarted) {
       chapterTargetedRetryUsed = false;
+      pendingRefetchSlotKey = "";
       markPageSlotError(targetEntry, resolvedIndex, "manual-refetch-start-failed", targetEntry.source);
       return false;
     }
 
     bumpReaderRenderEpoch("manual_refetch", false);
+    return true;
+  }
+
+  function requestTransitionSettledPageRecovery(pageEntry, fallbackIndex, reason, slotUpdatedAtMs) {
+    if (!currentChapter || !currentChapter.id || chapterRecoveryInProgress) {
+      return false;
+    }
+
+    var resolvedIndex = Math.round(Number(fallbackIndex));
+    if (isNaN(resolvedIndex) || resolvedIndex < 0 || resolvedIndex >= pageUrls.length) {
+      return false;
+    }
+
+    var targetEntry = normalizePageEntry(pageUrls[resolvedIndex]);
+    if (!targetEntry) {
+      return false;
+    }
+
+    var slotState = getPageSlotState(targetEntry, resolvedIndex);
+    if (String(slotState.status || "") !== "loading") {
+      return false;
+    }
+
+    var updatedAtMs = Number(slotUpdatedAtMs || slotState.updatedAtMs || 0);
+    if (updatedAtMs <= 0) {
+      return false;
+    }
+
+    var ageMs = Math.max(0, Date.now() - updatedAtMs);
+    if (ageMs < readerTransitionStuckThresholdMs) {
+      return false;
+    }
+
+    var slotKey = pageSlotKeyForEntry(targetEntry, resolvedIndex);
+    if (slotKey === "") {
+      return false;
+    }
+
+    var dedupeWindowMs = Math.max(600, Math.round(readerTransitionSettleMs * 0.7));
+    var recoveryAttempts = cloneObject(transitionRecoveryAttempts);
+    var lastAttemptAt = Number(recoveryAttempts[slotKey] || 0);
+    if (lastAttemptAt > 0 && (Date.now() - lastAttemptAt) < dedupeWindowMs) {
+      Diagnostics.debug("reader.transition.recovery.skipped_dedup", {
+        chapterId: currentChapter.id,
+        pageIndex: resolvedIndex,
+        pageIdentity: targetEntry.pageIdentity,
+        dedupeWindowMs: dedupeWindowMs,
+        ageMs: ageMs,
+        reason: String(reason || "transition_settle_recovery")
+      }, "Skipped duplicate transition recovery attempt for same page slot");
+      return false;
+    }
+
+    recoveryAttempts[slotKey] = Date.now();
+    transitionRecoveryAttempts = recoveryAttempts;
+
+    var retryAttempt = Math.max(1, Number(slotState.retryCount || slotState.failureCount || 0) + 1);
+    var forceFetchToken = ReaderService.buildTargetedRefetchToken(
+      currentChapter.id,
+      targetEntry.pageIdentity || targetEntry.source || "",
+      retryAttempt);
+
+    Diagnostics.warn("reader.transition.recovery.request", {
+      chapterId: currentChapter.id,
+      pageIndex: resolvedIndex,
+      pageIdentity: targetEntry.pageIdentity,
+      ageMs: ageMs,
+      reason: String(reason || "transition_settle_recovery")
+    }, "Visible page remained loading after transition settle; requesting targeted recovery");
+
+    markPageSlotLoading(targetEntry, resolvedIndex, "transition-settle-recovery");
+    var started = attemptTargetedPageRecovery(
+      targetEntry.source || "",
+      resolvedIndex,
+      reason || "transition_settle_recovery",
+      forceFetchToken,
+      slotKey,
+      false);
+
+    if (!started) {
+      markPageSlotError(targetEntry, resolvedIndex, "transition-settle-recovery-start-failed", targetEntry.source || "");
+      Diagnostics.warn("reader.transition.recovery.start_failed", {
+        chapterId: currentChapter.id,
+        pageIndex: resolvedIndex,
+        pageIdentity: targetEntry.pageIdentity,
+        reason: String(reason || "transition_settle_recovery")
+      }, "Transition-settle targeted recovery could not start");
+      return false;
+    }
+
+    return true;
+  }
+
+  function requestPageRefetchWithQualityToggle(pageEntry, fallbackIndex, reason) {
+    if (!currentChapter || !currentChapter.id) {
+      return false;
+    }
+
+    if (chapterRecoveryInProgress) {
+      return false;
+    }
+
+    qualityMode = qualityMode === "data" ? "data-saver" : "data";
+    Diagnostics.info("chapter.image_failure.manual_quality_toggle", {
+      chapterId: currentChapter.id,
+      qualityMode: qualityMode,
+      reason: String(reason || "manual_quality_refetch")
+    }, "User switched quality mode and requested targeted page refetch");
+
+    var didStart = requestPageRefetch(pageEntry, fallbackIndex, reason || "manual_quality_refetch");
+    if (!didStart) {
+      readerError = "Quality switched to " + qualityMode + ", but targeted refetch could not start.";
+      return false;
+    }
+
+    readerError = "Switched quality to " + qualityMode + " and requested a fresh page fetch.";
     return true;
   }
 
@@ -2315,6 +2653,7 @@ Item {
     chapterRetryUsed = false;
     chapterQualityFallbackUsed = false;
     chapterTargetedRetryUsed = false;
+    pendingRefetchSlotKey = "";
     chapterLoadState = "loading";
     Diagnostics.info("chapter.reload", {
       chapterId: currentChapter.id,

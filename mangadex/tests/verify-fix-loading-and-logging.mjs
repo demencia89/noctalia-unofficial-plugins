@@ -291,6 +291,43 @@ async function testMangaDexApi() {
     true,
     "rapid requests should produce pacing delay diagnostics",
   );
+
+  // 5) At-Home force fetch should include explicit cache bypass query params.
+  xhrHarness.queue.push({
+    status: 200,
+    body: {
+      baseUrl: "https://uploads.mangadex.org",
+      chapter: {
+        hash: "fresh-hash",
+        data: ["001.jpg"],
+        dataSaver: ["001.jpg"],
+      },
+    },
+  });
+
+  await callAsync((resolve, reject) =>
+    api.getAtHomeServer(
+      "chapter-force",
+      true,
+      resolve,
+      reject,
+      {
+        pacingMs: 0,
+        skipCacheToken: "force-token-42",
+      },
+    ),
+  );
+
+  const atHomeReq = xhrHarness.requests[xhrHarness.requests.length - 1];
+  const atHomeUrl = new URL(atHomeReq.url);
+
+  assert.equal(atHomeUrl.searchParams.get("cacheBust"), "force-token-42", "force fetch should include cacheBust token");
+  assert.equal(atHomeUrl.searchParams.get("forceRefresh"), "true", "force fetch should opt in to forceRefresh query flag");
+  assert.equal(
+    diagnosticsCollector.events.some((e) => e.event === "api.at_home.cache_bypass"),
+    true,
+    "force fetch requests should emit cache bypass diagnostics",
+  );
 }
 
 async function testAuthService() {
@@ -366,6 +403,9 @@ function testReaderService() {
     true,
     "reader invalid payload should emit diagnostics",
   );
+
+  const forceToken = reader.buildTargetedRefetchToken("chapter-a", "page-7.jpg", 2);
+  assert.equal(forceToken.startsWith("chapter-a::page-7.jpg::2::"), true, "force token should encode chapter/page/retry context");
 }
 
 function testStaticQmlChecks() {
@@ -378,14 +418,19 @@ function testStaticQmlChecks() {
   assert.equal(mainQml.includes("if (loadToken !== chapterLoadToken)"), true, "Main.qml should guard stale callbacks");
   assert.equal(mainQml.includes("chapterLoadState = \"success\""), true, "Main.qml should set success terminal state");
   assert.equal(mainQml.includes("chapterLoadState = \"error\""), true, "Main.qml should set error terminal state");
+  assert.equal(mainQml.includes("function requestPageRefetchWithQualityToggle("), true, "Main.qml should expose quality-toggle refetch API");
+  assert.equal(mainQml.includes("skipCacheToken"), true, "Main.qml should pass skipCacheToken for force fetch recovery");
 
   assert.equal(panelQml.includes("pageRepeater.itemAt(i)"), true, "Panel.qml should activate pages through repeater item lookup");
   assert.equal(panelQml.includes("item.inViewport = nextVisible"), true, "Panel.qml should update inViewport on resolved delegates");
+  assert.equal(panelQml.includes("slotLoadingStalled"), true, "Panel.qml should detect long-loading page stalls");
+  assert.equal(panelQml.includes("showChangeQualityAction"), true, "Panel.qml should expose retry-based quality action state");
+  assert.equal(panelQml.includes("requestPageRefetchWithQualityToggle"), true, "Panel.qml should wire change-quality retry action");
 
   assert.equal(settingsQml.includes("valueLoggingMode"), true, "Settings.qml should expose logging mode state");
   assert.equal(settingsQml.includes("pluginApi.pluginSettings.diagnostics.loggingMode"), true, "Settings.qml should persist diagnostics mode");
 
-  assert.equal(manifestJson.metadata.defaultSettings.diagnostics.loggingMode, "normal", "Manifest should define diagnostics logging default");
+  assert.equal(["normal", "off"].includes(manifestJson.metadata.defaultSettings.diagnostics.loggingMode), true, "Manifest should define diagnostics logging default");
   assert.equal(typeof manifestJson.metadata.defaultSettings.network.requestPacingMs, "number", "Manifest should define request pacing default");
   assert.equal(typeof manifestJson.metadata.defaultSettings.network.maxRetryAttempts, "number", "Manifest should define max retry attempts default");
   assert.equal(typeof manifestJson.metadata.defaultSettings.network.retryBaseDelayMs, "number", "Manifest should define retry base delay default");

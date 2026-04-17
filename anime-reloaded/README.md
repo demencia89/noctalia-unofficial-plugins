@@ -19,6 +19,6 @@ AnimeReloaded is a Noctalia anime plugin that combines AniList metadata with All
 
 ## Notes
 
-- This plugin uses Python helpers for provider and sync logic
-- `mpv` and `python3` are required in the runtime environment
-- local cache/session files are runtime data and are not part of this submission bundle
+- Provider and sync logic runs entirely in-process via QML JavaScript (no Python dependency)
+- `mpv` is required in the runtime environment for video playback
+- Crypto operations use bundled @noble/ciphers (AES-256-GCM) and @noble/hashes (SHA-256)
